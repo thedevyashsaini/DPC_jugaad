@@ -231,6 +231,21 @@ def cmd_status(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_nuke(args: argparse.Namespace) -> int:
+    wipe_tokens = bool(args.tokens)
+    wipe_devices = bool(args.devices)
+    if not wipe_tokens and not wipe_devices:
+        wipe_tokens = True
+        wipe_devices = True
+
+    endpoint = urljoin(args.server.rstrip("/") + "/", "api/admin/nuke")
+    headers = {"x-admin-token": args.admin_token}
+    payload = {"tokens": wipe_tokens, "devices": wipe_devices}
+    data = http_json("POST", endpoint, payload=payload, headers=headers)
+    print_json(data)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="abc",
@@ -249,9 +264,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--admin-token", required=True, help="Admin token configured in worker secret"
     )
     add_p.add_argument(
-        "--ttl", type=int, default=900, help="Token lifetime in seconds (default: 900)"
+        "--ttl",
+        type=int,
+        default=900,
+        help="Token lifetime in seconds; use 0 for never expires",
     )
     add_p.set_defaults(func=cmd_add)
+
+    nuke_p = sub.add_parser("nuke", help="Delete all join tokens and/or joined devices")
+    nuke_p.add_argument("--server", required=True, help="Worker URL")
+    nuke_p.add_argument("--admin-token", required=True, help="Admin token")
+    nuke_p.add_argument("--tokens", action="store_true", help="Delete all join tokens")
+    nuke_p.add_argument("--devices", action="store_true", help="Delete all devices")
+    nuke_p.set_defaults(func=cmd_nuke)
 
     join_p = sub.add_parser("join", help="Join this machine using one-time token")
     join_p.add_argument("--server", required=True, help="Worker URL")

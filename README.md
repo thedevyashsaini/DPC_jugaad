@@ -69,6 +69,8 @@ This installs the `abc` script from `pyproject.toml`.
 uv run abc add "Dev-Laptop" --server https://your-worker-url.workers.dev --admin-token <ADMIN_TOKEN>
 ```
 
+Use `--ttl 0` to create a token that never expires.
+
 Output includes a join command with one-time token.
 
 ### 2) Join device
@@ -101,9 +103,30 @@ Paste admin token, connect, select device, and send clipboard text.
 - `POST /api/admin/create-token` (admin auth)
 - `GET /api/admin/devices` (admin auth)
 - `POST /api/admin/devices/:id/send` (admin auth)
+- `POST /api/admin/nuke` (admin auth; delete tokens/devices)
 - `POST /api/agent/join` (join token)
 - `GET /ws/agent` (websocket, device credentials)
 - `GET /ws/dashboard` (websocket, admin token)
+
+## Reset/Nuke operations
+
+- Nuke both tokens and devices:
+
+```powershell
+uv run abc nuke --server https://your-worker-url.workers.dev --admin-token <ADMIN_TOKEN>
+```
+
+- Nuke only tokens:
+
+```powershell
+uv run abc nuke --server https://your-worker-url.workers.dev --admin-token <ADMIN_TOKEN> --tokens
+```
+
+- Nuke only devices:
+
+```powershell
+uv run abc nuke --server https://your-worker-url.workers.dev --admin-token <ADMIN_TOKEN> --devices
+```
 
 ## Security notes
 

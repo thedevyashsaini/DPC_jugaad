@@ -143,6 +143,32 @@ const DASHBOARD_HTML = `<!doctype html>
         white-space: pre-wrap;
         background: rgba(255, 255, 255, 0.72);
       }
+      .history {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        min-height: 140px;
+        max-height: 260px;
+        overflow: auto;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 8px;
+      }
+      .hist-item {
+        border: 1px solid #ede3d2;
+        border-radius: 8px;
+        background: #fff;
+        padding: 8px;
+        margin-bottom: 8px;
+      }
+      .hist-text {
+        font-size: 13px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .hist-time {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
       @media (max-width: 980px) {
         .grid { grid-template-columns: 1fr; min-height: auto; }
         .left { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -172,9 +198,16 @@ const DASHBOARD_HTML = `<!doctype html>
 
           <p class="eyebrow">Create Join Command</p>
           <div class="row"><input id="nameInput" placeholder="Device name (eg. Dev-Laptop)" /></div>
-          <div class="row"><input id="ttlInput" type="number" value="900" min="60" /></div>
+          <div class="row"><input id="ttlInput" type="number" value="900" min="0" /></div>
+          <div class="meta">TTL seconds (0 = never expires)</div>
           <div class="row"><button id="createTokenBtn">Generate Join Token</button></div>
           <pre id="joinCommand">No token generated yet</pre>
+
+          <p class="eyebrow">Danger Zone</p>
+          <div class="row">
+            <button class="ghost" id="nukeTokensBtn">Nuke All Tokens</button>
+            <button class="ghost" id="nukeDevicesBtn">Nuke All Devices</button>
+          </div>
 
           <p class="eyebrow">Joined Devices</p>
           <div class="list" id="deviceList"></div>
@@ -189,6 +222,8 @@ const DASHBOARD_HTML = `<!doctype html>
             <button id="sendBtn">Send Clipboard</button>
             <span class="status" id="status">Ready</span>
           </div>
+          <p class="eyebrow">Clipboard History (Selected Device)</p>
+          <div class="history" id="clipHistory"></div>
         </section>
       </section>
     </main>
@@ -203,10 +238,13 @@ const DASHBOARD_HTML = `<!doctype html>
       const joinCommand = document.getElementById("joinCommand");
       const deviceList = document.getElementById("deviceList");
       const clipboardView = document.getElementById("clipboardView");
+      const clipHistory = document.getElementById("clipHistory");
       const sendInput = document.getElementById("sendInput");
       const sendBtn = document.getElementById("sendBtn");
       const statusEl = document.getElementById("status");
       const badge = document.getElementById("badge");
+      const nukeTokensBtn = document.getElementById("nukeTokensBtn");
+      const nukeDevicesBtn = document.getElementById("nukeDevicesBtn");
 
       let selectedDeviceId = null;
       let devices = [];
@@ -258,6 +296,23 @@ const DASHBOARD_HTML = `<!doctype html>
 
         const selected = devices.find((d) => d.id === selectedDeviceId);
         clipboardView.textContent = selected ? selected.last_clipboard || "(empty clipboard)" : "Select a device";
+        renderHistory(selected ? selected.clipboard_history || [] : []);
+      }
+
+      function renderHistory(items) {
+        clipHistory.innerHTML = "";
+        if (!items.length) {
+          clipHistory.innerHTML = '<div class="meta">No clipboard history yet</div>';
+          return;
+        }
+        for (const item of items) {
+          const row = document.createElement("div");
+          row.className = "hist-item";
+          row.innerHTML =
+            '<div class="hist-text">' + escapeHtml(item.text || "") + "</div>" +
+            '<div class="hist-time">' + new Date(item.at || 0).toLocaleString() + "</div>";
+          clipHistory.appendChild(row);
+        }
       }
 
       async function authedFetch(path, init = {}) {
@@ -300,6 +355,23 @@ const DASHBOARD_HTML = `<!doctype html>
           setStatus("Join command generated", "ok");
         } catch (err) {
           setStatus(err.message || "Token generation failed", "err");
+        }
+      }
+
+      async function nuke(kind) {
+        try {
+          const body = { tokens: kind === "tokens" || kind === "both", devices: kind === "devices" || kind === "both" };
+          const res = await authedFetch("/api/admin/nuke", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const data = await res.json();
+          setStatus("Nuke complete: tokens=" + data.deleted_tokens + " devices=" + data.deleted_devices, "ok");
+          await refreshDevices();
+        } catch (err) {
+          setStatus(err.message || "Nuke failed", "err");
         }
       }
 
@@ -362,6 +434,8 @@ const DASHBOARD_HTML = `<!doctype html>
       refreshBtn.addEventListener("click", refreshDevices);
       createTokenBtn.addEventListener("click", createJoinToken);
       sendBtn.addEventListener("click", sendToDevice);
+      nukeTokensBtn.addEventListener("click", () => nuke("tokens"));
+      nukeDevicesBtn.addEventListener("click", () => nuke("devices"));
 
       if (cachedToken) {
         refreshDevices();
@@ -397,6 +471,20 @@ function randomToken(bytes = 18) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function appendClipboardHistory(device, text) {
+  if (!Array.isArray(device.clipboard_history)) {
+    device.clipboard_history = [];
+  }
+  const head = device.clipboard_history[0];
+  if (head && head.text === text) {
+    return;
+  }
+  device.clipboard_history.unshift({ text, at: nowIso() });
+  if (device.clipboard_history.length > 100) {
+    device.clipboard_history = device.clipboard_history.slice(0, 100);
+  }
 }
 
 function wsUrlFromHttp(url, path, params) {
@@ -460,6 +548,9 @@ export class ClipboardHub {
     if (path.startsWith("/api/admin/devices/") && path.endsWith("/send") && request.method === "POST") {
       return this.sendToDevice(request, path);
     }
+    if (path === "/api/admin/nuke" && request.method === "POST") {
+      return this.nukeState(request);
+    }
     if (path === "/api/agent/join" && request.method === "POST") {
       return this.joinAgent(request, url);
     }
@@ -509,13 +600,13 @@ export class ClipboardHub {
       return jsonResponse({ error: "name is required" }, 400);
     }
 
-    const ttl = Number(body.ttl_seconds || 900);
-    if (!Number.isFinite(ttl) || ttl < 60 || ttl > 86400) {
-      return jsonResponse({ error: "ttl_seconds must be between 60 and 86400" }, 400);
+    const ttl = Number(body.ttl_seconds ?? 900);
+    if (!Number.isFinite(ttl) || ttl < 0 || ttl > 315360000) {
+      return jsonResponse({ error: "ttl_seconds must be between 0 and 315360000" }, 400);
     }
 
     const token = randomToken(20);
-    const expiresAt = Date.now() + ttl * 1000;
+    const expiresAt = ttl === 0 ? null : Date.now() + ttl * 1000;
     await this.setJoinToken(token, {
       token,
       name: body.name.trim(),
@@ -525,7 +616,12 @@ export class ClipboardHub {
     });
 
     const joinCommand = `abc join --server ${url.origin} --token ${token}`;
-    return jsonResponse({ token, expires_at: new Date(expiresAt).toISOString(), join_command: joinCommand });
+    return jsonResponse({
+      token,
+      expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
+      never_expires: expiresAt === null,
+      join_command: joinCommand,
+    });
   }
 
   normalizeDevices(devices) {
@@ -543,7 +639,47 @@ export class ClipboardHub {
       last_seen_at: item.last_seen_at || null,
       joined_at: item.joined_at || null,
       connected: this.agentSockets.has(item.id),
+      clipboard_history: Array.isArray(item.clipboard_history) ? item.clipboard_history : [],
     }));
+  }
+
+  async nukeState(request) {
+    if (!(await this.verifyAdmin(request))) {
+      return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+    const body = (await readJson(request)) || {};
+    const wipeTokens = !!body.tokens;
+    const wipeDevices = !!body.devices;
+
+    let deletedTokens = 0;
+    let deletedDevices = 0;
+
+    if (wipeTokens) {
+      const entries = await this.state.storage.list({ prefix: "join:" });
+      const keys = [];
+      for (const key of entries.keys()) {
+        keys.push(key);
+      }
+      if (keys.length) {
+        await this.state.storage.delete(keys);
+      }
+      deletedTokens = keys.length;
+    }
+
+    if (wipeDevices) {
+      const devices = await this.getDevicesMap();
+      deletedDevices = Object.keys(devices).length;
+      await this.setDevicesMap({});
+      for (const ws of this.agentSockets.values()) {
+        try {
+          ws.close(1012, "Devices wiped by admin");
+        } catch {}
+      }
+      this.agentSockets.clear();
+    }
+
+    await this.broadcastDevices();
+    return jsonResponse({ ok: true, deleted_tokens: deletedTokens, deleted_devices: deletedDevices });
   }
 
   async listDevices(request) {
@@ -567,7 +703,7 @@ export class ClipboardHub {
     if (joinToken.used_at) {
       return jsonResponse({ error: "token already used" }, 409);
     }
-    if (Date.now() > joinToken.expires_at) {
+    if (joinToken.expires_at !== null && Date.now() > joinToken.expires_at) {
       return jsonResponse({ error: "token expired" }, 410);
     }
 
@@ -584,6 +720,7 @@ export class ClipboardHub {
       last_clipboard: "",
       last_clipboard_at: null,
       pending_clipboard: null,
+      clipboard_history: [],
     };
 
     joinToken.used_at = stamp;
@@ -622,6 +759,7 @@ export class ClipboardHub {
 
     device.pending_clipboard = body.text;
     device.last_seen_at = nowIso();
+    appendClipboardHistory(device, body.text);
     devices[deviceId] = device;
     await this.setDevicesMap(devices);
 
@@ -716,6 +854,7 @@ export class ClipboardHub {
       device.last_clipboard = payload.text;
       device.last_clipboard_at = nowIso();
       device.last_seen_at = nowIso();
+      appendClipboardHistory(device, payload.text);
       if (device.pending_clipboard === payload.text) {
         device.pending_clipboard = null;
       }
