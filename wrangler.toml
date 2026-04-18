@@ -1,0 +1,12 @@
+name = "clipboard-fleet"
+main = "worker.js"
+compatibility_date = "2026-04-18"
+
+[durable_objects]
+bindings = [
+  { name = "CLIPBOARD_HUB", class_name = "ClipboardHub" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ClipboardHub"]
