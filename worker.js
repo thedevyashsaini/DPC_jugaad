@@ -6,172 +6,298 @@ const DASHBOARD_HTML = `<!doctype html>
     <title>Clipboard Fleet</title>
     <style>
       :root {
-        --bg: #f5f1e8;
-        --paper: #fffdf8;
-        --ink: #1d1a15;
-        --muted: #70675d;
-        --line: #e2d9ca;
-        --brand: #ff5a36;
-        --brand2: #ffca42;
-        --ok: #1c8f4d;
-        --err: #c92a2a;
+        --black: #000;
+        --white: #fff;
+        --g0: #0a0a0a;
+        --g1: #111;
+        --g2: #1a1a1a;
+        --g3: #1f1f1f;
+        --g4: #303030;
       }
+
       * { box-sizing: border-box; }
+      html, body { height: 100%; }
+
       body {
         margin: 0;
-        min-height: 100vh;
-        font-family: "Plus Jakarta Sans", "Segoe UI", sans-serif;
-        background:
-          radial-gradient(800px 400px at 100% -10%, rgba(255, 90, 54, 0.18), transparent 70%),
-          radial-gradient(700px 300px at 0% 0%, rgba(255, 202, 66, 0.22), transparent 70%),
-          var(--bg);
-        color: var(--ink);
-        padding: 16px;
+        background: var(--black);
+        color: var(--white);
+        font-family: "SF Pro Text", "Helvetica Neue", "Inter", "Segoe UI", sans-serif;
+        font-weight: 400;
       }
+
       .app {
-        max-width: 1320px;
-        margin: 0 auto;
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        overflow: hidden;
-        background: rgba(255, 255, 255, 0.8);
-        backdrop-filter: blur(8px);
+        width: 100vw;
+        height: 100vh;
+        border: 1px solid #1b1b1b;
+        background: var(--black);
       }
+
       .top {
-        padding: 16px 18px;
-        border-bottom: 1px solid var(--line);
         display: flex;
         justify-content: space-between;
-        gap: 14px;
         align-items: center;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid #1b1b1b;
       }
+
+      .branding {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .mark {
+        width: 36px;
+        height: 36px;
+        border: 1px solid #3a3a3a;
+        background: var(--g1);
+      }
+
       .title {
         margin: 0;
-        font-size: clamp(22px, 3vw, 34px);
-        letter-spacing: -0.02em;
+        font-size: clamp(22px, 2.3vw, 36px);
+        font-weight: 580;
+        letter-spacing: -0.015em;
+        line-height: 1;
       }
-      .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
-      .badge {
+
+      .sub {
+        margin: 4px 0 0;
+        color: #9b9b9b;
         font-size: 12px;
-        border: 1px solid #ffd7ce;
-        border-radius: 999px;
-        background: linear-gradient(120deg, #ffe8e2, #fff3cf);
-        padding: 8px 12px;
       }
-      .grid {
+
+      .badge {
+        border: 1px solid #3a3a3a;
+        padding: 4px 9px;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--white);
+        background: var(--g1);
+      }
+
+      .layout {
         display: grid;
-        grid-template-columns: minmax(290px, 380px) 1fr;
-        min-height: calc(100vh - 140px);
+        grid-template-columns: 360px 1fr;
+        height: calc(100% - 80px);
       }
-      .left { border-right: 1px solid var(--line); padding: 16px; }
-      .right { padding: 16px; }
+
+      .sidebar {
+        border-right: 1px solid #1b1b1b;
+        overflow: auto;
+      }
+
+      .main {
+        overflow: auto;
+      }
+
+      .stack {
+        display: grid;
+        gap: 0;
+      }
+
+      .card,
+      .panel {
+        border-bottom: 1px solid #1b1b1b;
+        padding: 9px;
+        background: var(--black);
+      }
+
+      .eyebrow {
+        margin: 0 0 7px;
+        text-transform: uppercase;
+        letter-spacing: 0.11em;
+        font-size: 10px;
+        color: #b2b2b2;
+        font-weight: 600;
+      }
+
       .row {
         display: flex;
         gap: 8px;
         align-items: center;
-        margin-bottom: 10px;
         flex-wrap: wrap;
       }
-      input, textarea, select {
+
+      input,
+      textarea {
         width: 100%;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 10px;
-        background: var(--paper);
+        border: 1px solid #252525;
+        background: var(--g0);
+        color: var(--white);
         font: inherit;
+        font-size: 15px;
+        padding: 8px 9px;
       }
-      textarea { min-height: 170px; resize: vertical; }
+
+      input:focus,
+      textarea:focus {
+        outline: none;
+        border-color: #5f5f5f;
+      }
+
+      textarea {
+        min-height: 230px;
+        resize: vertical;
+      }
+
       button {
-        border: 0;
-        border-radius: 10px;
-        padding: 10px 12px;
+        border: 1px solid #2f2f2f;
+        background: var(--g1);
+        color: var(--white);
+        padding: 7px 11px;
         font: inherit;
-        font-weight: 700;
+        font-size: 15px;
+        font-weight: 560;
         cursor: pointer;
-        background: linear-gradient(120deg, var(--brand), var(--brand2));
-        color: #2f1900;
       }
+
+      button:hover {
+        background: var(--g2);
+      }
+
+      button.primary {
+        border-color: #5f5f5f;
+      }
+
       button.ghost {
-        border: 1px solid var(--line);
-        background: var(--paper);
-        color: var(--ink);
+        border-color: var(--g4);
       }
-      .eyebrow {
-        margin: 10px 0 8px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-size: 11px;
-        color: var(--muted);
-        font-weight: 700;
+
+      .meta {
+        font-size: 12px;
+        color: #a5a5a5;
       }
-      .list {
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.78);
-        max-height: calc(100vh - 350px);
-        min-height: 240px;
+
+      .status,
+      .status.ok,
+      .status.err {
+        font-size: 13px;
+        color: var(--white);
+      }
+
+      .device-list {
+        max-height: 46vh;
+        min-height: 220px;
         overflow: auto;
-        padding: 8px;
       }
+
       .device {
         width: 100%;
         text-align: left;
-        border: 1px solid transparent;
-        border-radius: 10px;
-        background: #fff;
-        padding: 10px;
-        margin-bottom: 8px;
+        border: 1px solid #1f1f1f;
+        padding: 9px;
+        background: var(--g0);
+        color: var(--white);
         cursor: pointer;
+        margin-bottom: 8px;
       }
-      .device.active { border-color: #ffab99; background: #fff7f4; }
-      .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
-      .ok { color: var(--ok); }
-      .err { color: var(--err); }
-      pre {
-        background: #191714;
-        color: #fff4d4;
-        border-radius: 10px;
-        padding: 10px;
-        overflow: auto;
+
+      .device:hover {
+        border-color: #4b4b4b;
       }
-      .status { font-size: 13px; color: var(--muted); }
-      .clip {
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        min-height: 170px;
+
+      .device.active {
+        border-color: #595959;
+        background: var(--g1);
+      }
+
+      .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 0;
+        margin-right: 6px;
+        background: var(--white);
+      }
+
+      .dot.live {
+        background: var(--white);
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 1.25fr 1fr;
+        gap: 0;
+        border-top: 1px solid var(--g3);
+      }
+
+      .split .panel {
+        border-bottom: 0;
+      }
+
+      .split .panel + .panel {
+        border-left: 1px solid var(--g3);
+      }
+
+      .clip-view {
+        min-height: 186px;
+        border: 1px solid var(--g3);
         padding: 12px;
         white-space: pre-wrap;
-        background: rgba(255, 255, 255, 0.72);
+        word-break: break-word;
+        background: var(--g0);
       }
-      .history {
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        min-height: 140px;
-        max-height: 260px;
+
+      pre {
+        margin: 0;
+        border: 1px solid var(--g3);
+        background: var(--g0);
+        color: var(--white);
+        padding: 10px;
         overflow: auto;
-        background: rgba(255, 255, 255, 0.72);
-        padding: 8px;
       }
+
+      .history {
+        max-height: 320px;
+        min-height: 220px;
+        overflow: auto;
+      }
+
       .hist-item {
-        border: 1px solid #ede3d2;
-        border-radius: 8px;
-        background: #fff;
-        padding: 8px;
+        border: 1px solid var(--g3);
+        background: var(--g0);
+        padding: 9px;
         margin-bottom: 8px;
       }
+
       .hist-text {
         font-size: 13px;
         white-space: pre-wrap;
         word-break: break-word;
       }
+
       .hist-time {
         margin-top: 6px;
         font-size: 11px;
-        color: var(--muted);
+        color: #bdbdbd;
       }
-      @media (max-width: 980px) {
-        .grid { grid-template-columns: 1fr; min-height: auto; }
-        .left { border-right: 0; border-bottom: 1px solid var(--line); }
+
+      @media (max-width: 1180px) {
+        .layout {
+          grid-template-columns: 1fr;
+          height: auto;
+        }
+
+        .sidebar {
+          border-right: 0;
+          border-bottom: 1px solid var(--g3);
+        }
+
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .split .panel + .panel {
+          border-left: 0;
+          border-top: 1px solid var(--g3);
+        }
+
+        .device-list {
+          max-height: 36vh;
+        }
       }
     </style>
   </head>
@@ -179,51 +305,80 @@ const DASHBOARD_HTML = `<!doctype html>
     <main class="app">
       <header class="top">
         <div>
-          <h1 class="title">Clipboard Fleet</h1>
-          <p class="sub">Central hub for all joined machine clipboards</p>
+          <div class="branding">
+            <div class="mark"></div>
+            <div>
+              <h1 class="title">Clipboard Fleet</h1>
+            </div>
+          </div>
+          <p class="sub">Live clipboard console for all joined machines</p>
         </div>
-        <div class="badge" id="badge">Disconnected</div>
+        <div class="badge offline" id="badge">Disconnected</div>
       </header>
 
-      <section class="grid">
-        <aside class="left">
-          <p class="eyebrow">Auth</p>
-          <div class="row">
-            <input id="adminToken" placeholder="Admin token" />
-          </div>
-          <div class="row">
-            <button id="connectBtn">Connect</button>
-            <button class="ghost" id="refreshBtn">Refresh</button>
-          </div>
+      <section class="layout">
+        <aside class="sidebar">
+          <div class="stack">
+            <div class="card soft">
+              <p class="eyebrow">Admin Access</p>
+              <input id="adminToken" placeholder="Admin token" />
+              <div class="row" style="margin-top:8px;">
+                <button class="primary" id="connectBtn">Connect</button>
+                <button class="ghost" id="refreshBtn">Refresh</button>
+              </div>
+            </div>
 
-          <p class="eyebrow">Create Join Command</p>
-          <div class="row"><input id="nameInput" placeholder="Device name (eg. Dev-Laptop)" /></div>
-          <div class="row"><input id="ttlInput" type="number" value="900" min="0" /></div>
-          <div class="meta">TTL seconds (0 = never expires)</div>
-          <div class="row"><button id="createTokenBtn">Generate Join Token</button></div>
-          <pre id="joinCommand">No token generated yet</pre>
+            <div class="card soft">
+              <p class="eyebrow">Create Join Command</p>
+              <input id="nameInput" placeholder="Device name (eg. dev-laptop)" />
+              <div style="height:8px;"></div>
+              <input id="ttlInput" type="number" value="900" min="0" />
+              <div class="meta" style="margin-top:6px;">TTL seconds (0 = never expires)</div>
+              <div class="row" style="margin-top:10px;">
+                <button class="primary" id="createTokenBtn">Generate Token</button>
+              </div>
+              <div style="height:10px;"></div>
+              <pre id="joinCommand">No token generated yet</pre>
+            </div>
 
-          <p class="eyebrow">Danger Zone</p>
-          <div class="row">
-            <button class="ghost" id="nukeTokensBtn">Nuke All Tokens</button>
-            <button class="ghost" id="nukeDevicesBtn">Nuke All Devices</button>
+            <div class="card soft">
+              <p class="eyebrow">Danger Zone</p>
+              <div class="row">
+                <button class="ghost" id="nukeTokensBtn">Nuke Tokens</button>
+                <button class="ghost" id="nukeDevicesBtn">Nuke Devices</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <p class="eyebrow">Joined Devices</p>
+              <div class="device-list" id="deviceList"></div>
+            </div>
           </div>
-
-          <p class="eyebrow">Joined Devices</p>
-          <div class="list" id="deviceList"></div>
         </aside>
 
-        <section class="right">
-          <p class="eyebrow">Selected Device Clipboard</p>
-          <div class="clip" id="clipboardView">Select a device</div>
-          <p class="eyebrow">Send To Selected Device</p>
-          <textarea id="sendInput" placeholder="Type text to push into selected machine clipboard"></textarea>
-          <div class="row">
-            <button id="sendBtn">Send Clipboard</button>
-            <span class="status" id="status">Ready</span>
+        <section class="main">
+          <div class="stack">
+            <div class="panel">
+              <p class="eyebrow">Selected Device Clipboard</p>
+              <div class="clip-view" id="clipboardView">Select a device to inspect clipboard</div>
+            </div>
+
+            <div class="split">
+              <div class="panel">
+                <p class="eyebrow">Send To Selected Device</p>
+                <textarea id="sendInput" placeholder="Type text and push it directly to selected machine clipboard"></textarea>
+                <div class="row" style="margin-top:10px;">
+                  <button class="primary" id="sendBtn">Send Clipboard</button>
+                  <span class="status" id="status">Ready</span>
+                </div>
+              </div>
+
+              <div class="panel">
+                <p class="eyebrow">Clipboard History</p>
+                <div class="history" id="clipHistory"></div>
+              </div>
+            </div>
           </div>
-          <p class="eyebrow">Clipboard History (Selected Device)</p>
-          <div class="history" id="clipHistory"></div>
         </section>
       </section>
     </main>
@@ -251,11 +406,24 @@ const DASHBOARD_HTML = `<!doctype html>
       let stream = null;
 
       const cachedToken = localStorage.getItem("clipboard_admin_token") || "";
-      if (cachedToken) adminTokenInput.value = cachedToken;
+      if (cachedToken) {
+        adminTokenInput.value = cachedToken;
+      }
 
       function setStatus(text, type) {
         statusEl.textContent = text;
         statusEl.className = "status " + (type || "");
+      }
+
+      function setBadgeState(text, mode) {
+        badge.textContent = text;
+        badge.className = "badge " + (mode || "offline");
+      }
+
+      function shortClip(text, limit) {
+        const value = text || "";
+        if (value.length <= limit) return value;
+        return value.slice(0, limit) + "...";
       }
 
       function escapeHtml(value) {
@@ -267,26 +435,35 @@ const DASHBOARD_HTML = `<!doctype html>
         if (!devices.length) {
           deviceList.innerHTML = '<div class="meta">No joined devices yet</div>';
           clipboardView.textContent = "No joined devices";
+          clipHistory.innerHTML = '<div class="meta">No clipboard history yet</div>';
           return;
         }
 
-        if (!selectedDeviceId) {
+        const exists = devices.some((x) => x.id === selectedDeviceId);
+        if (!exists) {
           selectedDeviceId = devices[0].id;
         }
 
         for (const device of devices) {
           const btn = document.createElement("button");
+          const liveClass = device.connected ? "live" : "";
           btn.className = "device " + (device.id === selectedDeviceId ? "active" : "");
           btn.type = "button";
           btn.innerHTML =
             '<div><strong>' +
             escapeHtml(device.name) +
             '</strong></div>' +
-            '<div class="meta">' +
+            '<div class="meta"><span class="dot ' +
+            liveClass +
+            '"></span>' +
             (device.connected ? "Online" : "Offline") +
             ' - Last seen ' +
             new Date(device.last_seen_at || 0).toLocaleString() +
+            "</div>" +
+            '<div class="meta">' +
+            escapeHtml(shortClip(device.last_clipboard || "", 76)) +
             "</div>";
+
           btn.addEventListener("click", () => {
             selectedDeviceId = device.id;
             showDevices();
@@ -360,7 +537,10 @@ const DASHBOARD_HTML = `<!doctype html>
 
       async function nuke(kind) {
         try {
-          const body = { tokens: kind === "tokens" || kind === "both", devices: kind === "devices" || kind === "both" };
+          const body = {
+            tokens: kind === "tokens" || kind === "both",
+            devices: kind === "devices" || kind === "both"
+          };
           const res = await authedFetch("/api/admin/nuke", {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -403,15 +583,15 @@ const DASHBOARD_HTML = `<!doctype html>
           wsProto + "://" + location.host + "/ws/dashboard?admin_token=" + encodeURIComponent(token)
         );
         stream.onopen = () => {
-          badge.textContent = "Live";
+          setBadgeState("Live", "live");
           setStatus("Live updates connected", "ok");
         };
         stream.onerror = () => {
-          badge.textContent = "Reconnecting";
+          setBadgeState("Reconnecting", "offline");
           setStatus("Live stream reconnecting", "err");
         };
         stream.onclose = () => {
-          badge.textContent = "Disconnected";
+          setBadgeState("Disconnected", "offline");
           setTimeout(connectEvents, 1500);
         };
         stream.onmessage = (event) => {

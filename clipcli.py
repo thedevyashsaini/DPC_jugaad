@@ -133,6 +133,9 @@ def windows_python_for_background() -> str:
     pyw = exe.with_name("pythonw.exe")
     if pyw.exists():
         return str(pyw)
+    base_pyw = Path(sys.base_prefix) / "pythonw.exe"
+    if base_pyw.exists():
+        return str(base_pyw)
     return str(exe)
 
 
@@ -141,7 +144,7 @@ def start_windows_agent_background(poll: float) -> None:
     log_file = STATE_DIR / "agent.log"
     py_exec = windows_python_for_background()
     script_path = str(Path(__file__).resolve())
-    args = [py_exec, script_path, "run", "--poll", str(poll)]
+    args = [py_exec, script_path, "run", "--poll", str(poll), "--silent"]
     creationflags = 0x00000008 | 0x00000200
     with log_file.open("a", encoding="utf-8") as handle:
         subprocess.Popen(
@@ -154,16 +157,18 @@ def start_windows_agent_background(poll: float) -> None:
         )
 
 
-def windows_running_agent_count() -> int:
-    script_path = str(Path(__file__).resolve())
+def windows_agent_process_ids() -> list[int]:
+    current_pid = os.getpid()
     ps_cmd = (
-        "$path = "
-        + repr(script_path)
+        "$pidNow = "
+        + str(current_pid)
         + "; "
         + "$procs = Get-CimInstance Win32_Process | Where-Object { "
-        + "$_.CommandLine -like '*clipcli.py* run*' -and $_.CommandLine -like ('*' + $path + '*') "
+        + "($_.ProcessId -ne $pidNow) -and $_.CommandLine -and "
+        + "(($_.CommandLine.Contains('clipcli.py') -and $_.CommandLine.Contains(' run')) -or "
+        + " ($_.CommandLine.Contains('abc.exe') -and $_.CommandLine.Contains(' run'))) "
         + "}; "
-        + "Write-Output ($procs | Measure-Object).Count"
+        + "$procs | Select-Object -ExpandProperty ProcessId | ConvertTo-Json -Compress"
     )
     result = run_command(
         ["powershell", "-NoProfile", "-Command", ps_cmd],
@@ -171,10 +176,25 @@ def windows_running_agent_count() -> int:
         capture=True,
     )
     raw = (result.stdout or "").strip()
+    if not raw:
+        return []
     try:
-        return int(raw)
-    except ValueError:
-        return 0
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, int):
+        return [data]
+    if isinstance(data, list):
+        out: list[int] = []
+        for item in data:
+            if isinstance(item, int):
+                out.append(item)
+        return out
+    return []
+
+
+def windows_running_agent_count() -> int:
+    return len(windows_agent_process_ids())
 
 
 def install_linux_service(name: str, poll: float) -> int:
@@ -248,34 +268,16 @@ def uninstall_linux_service(name: str) -> int:
 
 def start_windows_service(name: str) -> int:
     poll = read_saved_poll()
+    stop_windows_agent_processes()
     start_windows_agent_background(poll)
-
-    launcher = windows_launcher_path(name)
-    if launcher.exists():
-        run_command(["cmd", "/c", str(launcher)], check=False)
-        print(f"Started launcher: {launcher}")
-        return 0
-
-    result = run_command(["schtasks", "/Run", "/TN", name], check=False, capture=True)
-    if result.returncode == 0:
-        print(f"Started task: {name}")
-        return 0
-    print(f"No startup launcher or task found for: {name}")
-    return 1
+    print(f"Started background agent process for: {name}")
+    return 0
 
 
 def stop_windows_agent_processes() -> None:
-    script_path = str(Path(__file__).resolve())
-    ps_cmd = (
-        "$path = "
-        + repr(script_path)
-        + "; "
-        + "$procs = Get-CimInstance Win32_Process | Where-Object { "
-        + "$_.CommandLine -like '*clipcli.py* run*' -and $_.CommandLine -like ('*' + $path + '*') "
-        + "}; "
-        + "$procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    )
-    run_command(["powershell", "-NoProfile", "-Command", ps_cmd], check=False)
+    pids = windows_agent_process_ids()
+    for pid in pids:
+        run_command(["taskkill", "/PID", str(pid), "/T", "/F"], check=False)
 
 
 def read_saved_poll() -> float:
@@ -310,8 +312,10 @@ def install_windows_service(name: str, poll: float) -> int:
         return 1
 
     save_service_config(name, poll)
+    stop_windows_agent_processes()
 
-    exec_args = build_agent_exec_args(poll)
+    py_exec = windows_python_for_background()
+    exec_args = [py_exec, "-m", "clipcli", "run", "--poll", str(poll), "--silent"]
     task_cmd = command_for_display(exec_args)
     try:
         run_command(
@@ -329,8 +333,10 @@ def install_windows_service(name: str, poll: float) -> int:
                 "/F",
             ]
         )
-        run_command(["schtasks", "/Run", "/TN", name], check=False)
         start_windows_agent_background(poll)
+        launcher = windows_launcher_path(name)
+        if launcher.exists():
+            launcher.unlink()
         print(f"Installed and started scheduled task: {name}")
         print(
             "Task trigger: ONLOGON (starts automatically after reboot when user logs in)"
@@ -339,17 +345,14 @@ def install_windows_service(name: str, poll: float) -> int:
     except subprocess.CalledProcessError:
         launcher = windows_launcher_path(name)
         launcher.parent.mkdir(parents=True, exist_ok=True)
-        py_exec = windows_python_for_background()
-        script_path = str(Path(__file__).resolve())
         launcher_content = (
             "@echo off\r\n"
             "setlocal\r\n"
             + 'start "" "'
             + py_exec
-            + '" "'
-            + script_path
-            + '" run --poll '
+            + '" -m clipcli run --poll '
             + str(poll)
+            + " --silent"
             + "\r\n"
         )
         launcher.write_text(launcher_content, encoding="utf-8")
@@ -381,8 +384,27 @@ def status_windows_service(name: str) -> int:
     print(f"Startup launcher exists: {'yes' if launcher.exists() else 'no'}")
     print(f"Running agent processes: {running}")
     print(f"Configured poll: {read_saved_poll()}s")
+    if task_exists and launcher.exists():
+        print(
+            "Warning: both task and startup launcher exist; this can start duplicate agents on login."
+        )
     if task_exists:
         print("Task name: " + name)
+        detail = run_command(
+            ["schtasks", "/Query", "/TN", name, "/V", "/FO", "LIST"],
+            check=False,
+            capture=True,
+        )
+        text = detail.stdout or ""
+        for line in text.splitlines():
+            if line.startswith("Task To Run:"):
+                print(line.strip())
+                break
+        run_text = detail.stdout or ""
+        if 'clipcli.py" run' in run_text and "-m clipcli run" not in run_text:
+            print(
+                "Warning: task still points to old command; reinstall service to update it."
+            )
     if launcher.exists():
         print("Launcher path: " + str(launcher))
     return 0 if (task_exists or launcher.exists()) else 1
@@ -478,9 +500,15 @@ def cmd_join(args: argparse.Namespace) -> int:
 
 
 class ClipboardAgent:
-    def __init__(self, state: dict[str, Any], poll_seconds: float = 0.25):
+    def __init__(
+        self,
+        state: dict[str, Any],
+        poll_seconds: float = 0.25,
+        silent: bool = False,
+    ):
         self.state = state
         self.poll_seconds = poll_seconds
+        self.silent = silent
         self.ws = None
         self.running = True
         self.last_clipboard = ""
@@ -491,12 +519,14 @@ class ClipboardAgent:
             try:
                 await self.connect_and_loop()
             except Exception as exc:
-                print(f"[agent] disconnected: {exc}")
+                if not self.silent:
+                    print(f"[agent] disconnected: {exc}")
                 await asyncio.sleep(2 + random.random() * 2)
 
     async def connect_and_loop(self) -> None:
         ws_url = self.state["ws_url"]
-        print(f"[agent] connecting to {ws_url}")
+        if not self.silent:
+            print(f"[agent] connecting to {ws_url}")
         async with websockets.connect(
             ws_url,
             ping_interval=20,
@@ -504,7 +534,8 @@ class ClipboardAgent:
             user_agent_header=CLI_USER_AGENT,
         ) as ws:
             self.ws = ws
-            print("[agent] connected")
+            if not self.silent:
+                print("[agent] connected")
             self.last_clipboard = self.read_clipboard_safe()
             if self.last_clipboard is not None:
                 await self.send_clipboard(self.last_clipboard)
@@ -522,12 +553,12 @@ class ClipboardAgent:
                 if err:
                     raise err
 
-    def read_clipboard_safe(self) -> str:
+    def read_clipboard_safe(self) -> str | None:
         try:
             value = pyperclip.paste()
             return value if isinstance(value, str) else str(value)
         except pyperclip.PyperclipException:
-            return ""
+            return None
 
     def write_clipboard_safe(self, text: str) -> None:
         try:
@@ -553,6 +584,9 @@ class ClipboardAgent:
     async def watch_clipboard(self) -> None:
         while True:
             now = self.read_clipboard_safe()
+            if now is None:
+                await asyncio.sleep(self.poll_seconds)
+                continue
             if now != self.last_clipboard:
                 self.last_clipboard = now
                 await self.send_clipboard(now)
@@ -581,11 +615,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not state:
         return 1
 
-    print(
-        f"Starting clipboard agent for {state.get('name', 'device')} ({state.get('device_id')})"
-    )
+    if not args.silent:
+        print(
+            f"Starting clipboard agent for {state.get('name', 'device')} ({state.get('device_id')})"
+        )
     try:
-        asyncio.run(ClipboardAgent(state=state, poll_seconds=args.poll).run())
+        asyncio.run(
+            ClipboardAgent(
+                state=state,
+                poll_seconds=args.poll,
+                silent=bool(getattr(args, "silent", False)),
+            ).run()
+        )
     except KeyboardInterrupt:
         print("Stopped.")
     return 0
@@ -655,6 +696,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run", help="Run local clipboard agent")
     run_p.add_argument(
         "--poll", type=float, default=0.25, help="Clipboard poll interval in seconds"
+    )
+    run_p.add_argument(
+        "--silent",
+        action="store_true",
+        help="Suppress startup logs (useful for background service)",
     )
     run_p.set_defaults(func=cmd_run)
 
