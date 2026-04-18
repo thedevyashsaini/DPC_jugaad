@@ -93,6 +93,30 @@ uv run abc run
 
 Now machine clipboard syncs with central hub.
 
+### 3b) Keep agent always running (recommended)
+
+Install persistent background service (works across terminal close and reboot):
+
+```powershell
+uv run abc service install
+```
+
+Common service controls:
+
+```powershell
+uv run abc service status
+uv run abc service stop
+uv run abc service start
+uv run abc service uninstall
+```
+
+Platform behavior:
+
+- **Windows**: creates a Scheduled Task (`ONLOGON`) and starts it.
+- **Linux**: creates a user-level `systemd` service and enables it.
+  - For startup before interactive login, enable linger once:
+    - `loginctl enable-linger $USER`
+
 ### 4) Open dashboard
 
 Visit worker URL in browser (`/`).

@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
+import shlex
+import subprocess
 import sys
 import time
 import urllib.error
@@ -18,6 +21,7 @@ import websockets
 
 STATE_DIR = Path.home() / ".clipboard_fleet"
 STATE_FILE = STATE_DIR / "device.json"
+DEFAULT_SERVICE_NAME = "clipboard-fleet-agent"
 CLI_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -73,6 +77,214 @@ def save_state(data: dict[str, Any]) -> None:
     STATE_FILE.write_text(
         json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8"
     )
+
+
+def run_command(
+    args: list[str], check: bool = True, capture: bool = False
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        check=check,
+        text=True,
+        capture_output=capture,
+    )
+
+
+def command_for_display(args: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline(args)
+    return shlex.join(args)
+
+
+def build_agent_exec_args(poll: float) -> list[str]:
+    script_path = str(Path(__file__).resolve())
+    return [sys.executable, script_path, "run", "--poll", str(poll)]
+
+
+def require_joined_state() -> dict[str, Any] | None:
+    state = load_state()
+    if not state:
+        print(
+            "No joined device state found. Run: abc join --server <url> --token <token>"
+        )
+        return None
+    return state
+
+
+def linux_service_path(name: str) -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
+
+
+def install_linux_service(name: str, poll: float) -> int:
+    if require_joined_state() is None:
+        return 1
+
+    unit_path = linux_service_path(name)
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    exec_args = build_agent_exec_args(poll)
+    exec_line = " ".join(shlex.quote(x) for x in exec_args)
+    workdir = shlex.quote(str(Path(__file__).resolve().parent))
+    unit_text = (
+        "[Unit]\n"
+        "Description=Clipboard Fleet Agent\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"WorkingDirectory={workdir}\n"
+        f"ExecStart={exec_line}\n"
+        "Restart=always\n"
+        "RestartSec=2\n"
+        "Environment=PYTHONUNBUFFERED=1\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+    unit_path.write_text(unit_text, encoding="utf-8")
+
+    run_command(["systemctl", "--user", "daemon-reload"])
+    run_command(["systemctl", "--user", "enable", "--now", f"{name}.service"])
+    print(f"Installed and started user service: {name}")
+    print(f"Unit file: {unit_path}")
+    print("To start even before interactive login, run: loginctl enable-linger $USER")
+    return 0
+
+
+def install_windows_service(name: str, poll: float) -> int:
+    if require_joined_state() is None:
+        return 1
+
+    exec_args = build_agent_exec_args(poll)
+    task_cmd = command_for_display(exec_args)
+    run_command(
+        [
+            "schtasks",
+            "/Create",
+            "/TN",
+            name,
+            "/SC",
+            "ONLOGON",
+            "/TR",
+            task_cmd,
+            "/F",
+        ]
+    )
+    run_command(["schtasks", "/Run", "/TN", name], check=False)
+    print(f"Installed and started scheduled task: {name}")
+    print("Task trigger: ONLOGON (starts automatically after reboot when user logs in)")
+    return 0
+
+
+def start_linux_service(name: str) -> int:
+    run_command(["systemctl", "--user", "start", f"{name}.service"])
+    print(f"Started service: {name}")
+    return 0
+
+
+def stop_linux_service(name: str) -> int:
+    run_command(["systemctl", "--user", "stop", f"{name}.service"])
+    print(f"Stopped service: {name}")
+    return 0
+
+
+def status_linux_service(name: str) -> int:
+    result = run_command(
+        ["systemctl", "--user", "status", f"{name}.service", "--no-pager"],
+        check=False,
+        capture=True,
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    print(output.strip() or f"No status output for {name}")
+    return 0 if result.returncode == 0 else 1
+
+
+def uninstall_linux_service(name: str) -> int:
+    run_command(
+        ["systemctl", "--user", "disable", "--now", f"{name}.service"], check=False
+    )
+    unit_path = linux_service_path(name)
+    if unit_path.exists():
+        unit_path.unlink()
+    run_command(["systemctl", "--user", "daemon-reload"], check=False)
+    print(f"Uninstalled service: {name}")
+    return 0
+
+
+def start_windows_service(name: str) -> int:
+    run_command(["schtasks", "/Run", "/TN", name])
+    print(f"Started task: {name}")
+    return 0
+
+
+def stop_windows_service(name: str) -> int:
+    run_command(["schtasks", "/End", "/TN", name], check=False)
+    print(f"Stopped task: {name}")
+    return 0
+
+
+def status_windows_service(name: str) -> int:
+    result = run_command(
+        ["schtasks", "/Query", "/TN", name, "/V", "/FO", "LIST"],
+        check=False,
+        capture=True,
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    print(output.strip() or f"No status output for {name}")
+    return 0 if result.returncode == 0 else 1
+
+
+def uninstall_windows_service(name: str) -> int:
+    run_command(["schtasks", "/Delete", "/TN", name, "/F"], check=False)
+    print(f"Uninstalled task: {name}")
+    return 0
+
+
+def cmd_service_install(args: argparse.Namespace) -> int:
+    try:
+        if os.name == "nt":
+            return install_windows_service(args.name, args.poll)
+        return install_linux_service(args.name, args.poll)
+    except FileNotFoundError as exc:
+        print(f"Missing platform command: {exc}")
+        return 1
+    except subprocess.CalledProcessError as exc:
+        print(f"Service install failed (exit {exc.returncode}): {exc}")
+        return 1
+
+
+def cmd_service_start(args: argparse.Namespace) -> int:
+    try:
+        if os.name == "nt":
+            return start_windows_service(args.name)
+        return start_linux_service(args.name)
+    except subprocess.CalledProcessError as exc:
+        print(f"Service start failed (exit {exc.returncode}): {exc}")
+        return 1
+
+
+def cmd_service_stop(args: argparse.Namespace) -> int:
+    try:
+        if os.name == "nt":
+            return stop_windows_service(args.name)
+        return stop_linux_service(args.name)
+    except subprocess.CalledProcessError as exc:
+        print(f"Service stop failed (exit {exc.returncode}): {exc}")
+        return 1
+
+
+def cmd_service_status(args: argparse.Namespace) -> int:
+    if os.name == "nt":
+        return status_windows_service(args.name)
+    return status_linux_service(args.name)
+
+
+def cmd_service_uninstall(args: argparse.Namespace) -> int:
+    try:
+        if os.name == "nt":
+            return uninstall_windows_service(args.name)
+        return uninstall_linux_service(args.name)
+    except subprocess.CalledProcessError as exc:
+        print(f"Service uninstall failed (exit {exc.returncode}): {exc}")
+        return 1
 
 
 def cmd_add(args: argparse.Namespace) -> int:
@@ -205,11 +417,8 @@ class ClipboardAgent:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    state = load_state()
+    state = require_joined_state()
     if not state:
-        print(
-            "No joined device state found. Run: abc join --server <url> --token <token>"
-        )
         return 1
 
     print(
@@ -291,6 +500,61 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_p = sub.add_parser("status", help="Show saved device state")
     status_p.set_defaults(func=cmd_status)
+
+    svc_p = sub.add_parser("service", help="Manage persistent background agent service")
+    svc_sub = svc_p.add_subparsers(dest="service_command", required=True)
+
+    svc_install = svc_sub.add_parser(
+        "install",
+        help="Install and start persistent agent service",
+    )
+    svc_install.add_argument(
+        "--name",
+        default=DEFAULT_SERVICE_NAME,
+        help=f"Service/task name (default: {DEFAULT_SERVICE_NAME})",
+    )
+    svc_install.add_argument(
+        "--poll",
+        type=float,
+        default=0.25,
+        help="Clipboard poll interval in seconds",
+    )
+    svc_install.set_defaults(func=cmd_service_install)
+
+    svc_start = svc_sub.add_parser("start", help="Start installed service")
+    svc_start.add_argument(
+        "--name",
+        default=DEFAULT_SERVICE_NAME,
+        help=f"Service/task name (default: {DEFAULT_SERVICE_NAME})",
+    )
+    svc_start.set_defaults(func=cmd_service_start)
+
+    svc_stop = svc_sub.add_parser("stop", help="Stop installed service")
+    svc_stop.add_argument(
+        "--name",
+        default=DEFAULT_SERVICE_NAME,
+        help=f"Service/task name (default: {DEFAULT_SERVICE_NAME})",
+    )
+    svc_stop.set_defaults(func=cmd_service_stop)
+
+    svc_status = svc_sub.add_parser("status", help="Show service status")
+    svc_status.add_argument(
+        "--name",
+        default=DEFAULT_SERVICE_NAME,
+        help=f"Service/task name (default: {DEFAULT_SERVICE_NAME})",
+    )
+    svc_status.set_defaults(func=cmd_service_status)
+
+    svc_uninstall = svc_sub.add_parser(
+        "uninstall",
+        help="Uninstall persistent service",
+    )
+    svc_uninstall.add_argument(
+        "--name",
+        default=DEFAULT_SERVICE_NAME,
+        help=f"Service/task name (default: {DEFAULT_SERVICE_NAME})",
+    )
+    svc_uninstall.set_defaults(func=cmd_service_uninstall)
 
     return parser
 
