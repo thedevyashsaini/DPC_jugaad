@@ -115,6 +115,68 @@ def linux_service_path(name: str) -> Path:
     return Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
 
 
+def windows_startup_dir() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        raise RuntimeError("APPDATA environment variable is missing")
+    return (
+        Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    )
+
+
+def windows_launcher_path(name: str) -> Path:
+    return windows_startup_dir() / f"{name}.cmd"
+
+
+def windows_python_for_background() -> str:
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")
+    if pyw.exists():
+        return str(pyw)
+    return str(exe)
+
+
+def start_windows_agent_background(poll: float) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = STATE_DIR / "agent.log"
+    py_exec = windows_python_for_background()
+    script_path = str(Path(__file__).resolve())
+    args = [py_exec, script_path, "run", "--poll", str(poll)]
+    creationflags = 0x00000008 | 0x00000200
+    with log_file.open("a", encoding="utf-8") as handle:
+        subprocess.Popen(
+            args,
+            cwd=str(Path(__file__).resolve().parent),
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=handle,
+            creationflags=creationflags,
+        )
+
+
+def windows_running_agent_count() -> int:
+    script_path = str(Path(__file__).resolve())
+    ps_cmd = (
+        "$path = "
+        + repr(script_path)
+        + "; "
+        + "$procs = Get-CimInstance Win32_Process | Where-Object { "
+        + "$_.CommandLine -like '*clipcli.py* run*' -and $_.CommandLine -like ('*' + $path + '*') "
+        + "}; "
+        + "Write-Output ($procs | Measure-Object).Count"
+    )
+    result = run_command(
+        ["powershell", "-NoProfile", "-Command", ps_cmd],
+        check=False,
+        capture=True,
+    )
+    raw = (result.stdout or "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
 def install_linux_service(name: str, poll: float) -> int:
     if require_joined_state() is None:
         return 1
@@ -146,31 +208,6 @@ def install_linux_service(name: str, poll: float) -> int:
     print(f"Installed and started user service: {name}")
     print(f"Unit file: {unit_path}")
     print("To start even before interactive login, run: loginctl enable-linger $USER")
-    return 0
-
-
-def install_windows_service(name: str, poll: float) -> int:
-    if require_joined_state() is None:
-        return 1
-
-    exec_args = build_agent_exec_args(poll)
-    task_cmd = command_for_display(exec_args)
-    run_command(
-        [
-            "schtasks",
-            "/Create",
-            "/TN",
-            name,
-            "/SC",
-            "ONLOGON",
-            "/TR",
-            task_cmd,
-            "/F",
-        ]
-    )
-    run_command(["schtasks", "/Run", "/TN", name], check=False)
-    print(f"Installed and started scheduled task: {name}")
-    print("Task trigger: ONLOGON (starts automatically after reboot when user logs in)")
     return 0
 
 
@@ -210,31 +247,154 @@ def uninstall_linux_service(name: str) -> int:
 
 
 def start_windows_service(name: str) -> int:
-    run_command(["schtasks", "/Run", "/TN", name])
-    print(f"Started task: {name}")
+    poll = read_saved_poll()
+    start_windows_agent_background(poll)
+
+    launcher = windows_launcher_path(name)
+    if launcher.exists():
+        run_command(["cmd", "/c", str(launcher)], check=False)
+        print(f"Started launcher: {launcher}")
+        return 0
+
+    result = run_command(["schtasks", "/Run", "/TN", name], check=False, capture=True)
+    if result.returncode == 0:
+        print(f"Started task: {name}")
+        return 0
+    print(f"No startup launcher or task found for: {name}")
+    return 1
+
+
+def stop_windows_agent_processes() -> None:
+    script_path = str(Path(__file__).resolve())
+    ps_cmd = (
+        "$path = "
+        + repr(script_path)
+        + "; "
+        + "$procs = Get-CimInstance Win32_Process | Where-Object { "
+        + "$_.CommandLine -like '*clipcli.py* run*' -and $_.CommandLine -like ('*' + $path + '*') "
+        + "}; "
+        + "$procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    )
+    run_command(["powershell", "-NoProfile", "-Command", ps_cmd], check=False)
+
+
+def read_saved_poll() -> float:
+    config_path = STATE_DIR / "service.json"
+    if not config_path.exists():
+        return 0.25
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        value = float(data.get("poll", 0.25))
+        return value if value > 0 else 0.25
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return 0.25
+
+
+def save_service_config(name: str, poll: float) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    config_path = STATE_DIR / "service.json"
+    config_path.write_text(
+        json.dumps({"name": name, "poll": poll}, ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
+
+
+def clear_service_config() -> None:
+    config_path = STATE_DIR / "service.json"
+    if config_path.exists():
+        config_path.unlink()
+
+
+def install_windows_service(name: str, poll: float) -> int:
+    if require_joined_state() is None:
+        return 1
+
+    save_service_config(name, poll)
+
+    exec_args = build_agent_exec_args(poll)
+    task_cmd = command_for_display(exec_args)
+    try:
+        run_command(
+            [
+                "schtasks",
+                "/Create",
+                "/TN",
+                name,
+                "/SC",
+                "ONLOGON",
+                "/RL",
+                "LIMITED",
+                "/TR",
+                task_cmd,
+                "/F",
+            ]
+        )
+        run_command(["schtasks", "/Run", "/TN", name], check=False)
+        start_windows_agent_background(poll)
+        print(f"Installed and started scheduled task: {name}")
+        print(
+            "Task trigger: ONLOGON (starts automatically after reboot when user logs in)"
+        )
+        return 0
+    except subprocess.CalledProcessError:
+        launcher = windows_launcher_path(name)
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        py_exec = windows_python_for_background()
+        script_path = str(Path(__file__).resolve())
+        launcher_content = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            + 'start "" "'
+            + py_exec
+            + '" "'
+            + script_path
+            + '" run --poll '
+            + str(poll)
+            + "\r\n"
+        )
+        launcher.write_text(launcher_content, encoding="utf-8")
+        start_windows_agent_background(poll)
+        print("Scheduled Task creation failed (likely permission policy).")
+        print(f"Fallback installed startup launcher: {launcher}")
+        print("Startup launcher runs automatically at user login.")
     return 0
 
 
 def stop_windows_service(name: str) -> int:
     run_command(["schtasks", "/End", "/TN", name], check=False)
-    print(f"Stopped task: {name}")
+    stop_windows_agent_processes()
+    print(f"Stopped task/processes for: {name}")
     return 0
 
 
 def status_windows_service(name: str) -> int:
-    result = run_command(
-        ["schtasks", "/Query", "/TN", name, "/V", "/FO", "LIST"],
+    launcher = windows_launcher_path(name)
+    task_query = run_command(
+        ["schtasks", "/Query", "/TN", name],
         check=False,
         capture=True,
     )
-    output = (result.stdout or "") + (result.stderr or "")
-    print(output.strip() or f"No status output for {name}")
-    return 0 if result.returncode == 0 else 1
+    task_exists = task_query.returncode == 0
+    running = windows_running_agent_count()
+
+    print(f"Task exists: {'yes' if task_exists else 'no'}")
+    print(f"Startup launcher exists: {'yes' if launcher.exists() else 'no'}")
+    print(f"Running agent processes: {running}")
+    print(f"Configured poll: {read_saved_poll()}s")
+    if task_exists:
+        print("Task name: " + name)
+    if launcher.exists():
+        print("Launcher path: " + str(launcher))
+    return 0 if (task_exists or launcher.exists()) else 1
 
 
 def uninstall_windows_service(name: str) -> int:
     run_command(["schtasks", "/Delete", "/TN", name, "/F"], check=False)
-    print(f"Uninstalled task: {name}")
+    launcher = windows_launcher_path(name)
+    if launcher.exists():
+        launcher.unlink()
+    clear_service_config()
+    print(f"Uninstalled task/launcher: {name}")
     return 0
 
 
