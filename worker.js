@@ -653,6 +653,48 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+const MAX_PENDING_COMMANDS = 200;
+const MAX_RECENT_EVENT_IDS = 500;
+const ONLINE_STALE_MS = 18000;
+
+function commandId() {
+  return `cmd_${randomToken(10)}`;
+}
+
+function ensureDeviceQueues(device) {
+  if (!Array.isArray(device.pending_commands)) {
+    device.pending_commands = [];
+  }
+  if (!Array.isArray(device.recent_clipboard_event_ids)) {
+    device.recent_clipboard_event_ids = [];
+  }
+}
+
+function hasRecentEventId(device, eventId) {
+  ensureDeviceQueues(device);
+  return device.recent_clipboard_event_ids.includes(eventId);
+}
+
+function addRecentEventId(device, eventId) {
+  ensureDeviceQueues(device);
+  if (device.recent_clipboard_event_ids.includes(eventId)) {
+    return;
+  }
+  device.recent_clipboard_event_ids.push(eventId);
+  if (device.recent_clipboard_event_ids.length > MAX_RECENT_EVENT_IDS) {
+    device.recent_clipboard_event_ids = device.recent_clipboard_event_ids.slice(
+      device.recent_clipboard_event_ids.length - MAX_RECENT_EVENT_IDS
+    );
+  }
+}
+
+function removePendingCommand(device, cmdId) {
+  ensureDeviceQueues(device);
+  const before = device.pending_commands.length;
+  device.pending_commands = device.pending_commands.filter((x) => x.cmd_id !== cmdId);
+  return before !== device.pending_commands.length;
+}
+
 function appendClipboardHistory(device, text) {
   if (!Array.isArray(device.clipboard_history)) {
     device.clipboard_history = [];
@@ -770,6 +812,38 @@ export class ClipboardHub {
     return this.state.storage.get(`join:${token}`);
   }
 
+  sendPendingCommandsToSocket(socket, device) {
+    ensureDeviceQueues(device);
+    for (const cmd of device.pending_commands) {
+      try {
+        socket.send(
+          JSON.stringify({
+            type: "set_clipboard",
+            cmd_id: cmd.cmd_id,
+            text: cmd.text,
+            created_at: cmd.created_at,
+          })
+        );
+      } catch {
+        break;
+      }
+    }
+  }
+
+  pruneStaleAgentSockets(devices) {
+    const now = Date.now();
+    for (const [deviceId, ws] of this.agentSockets.entries()) {
+      const device = devices[deviceId];
+      const lastSeen = device && device.last_seen_at ? Date.parse(device.last_seen_at) : 0;
+      if (!lastSeen || now - lastSeen > ONLINE_STALE_MS) {
+        this.agentSockets.delete(deviceId);
+        try {
+          ws.close(1012, "stale connection");
+        } catch {}
+      }
+    }
+  }
+
   async createJoinToken(request, url) {
     if (!(await this.verifyAdmin(request))) {
       return jsonResponse({ error: "Unauthorized" }, 401);
@@ -806,6 +880,7 @@ export class ClipboardHub {
 
   normalizeDevices(devices) {
     const values = Object.values(devices);
+    const now = Date.now();
     values.sort((a, b) => {
       const ta = Date.parse(a.last_seen_at || 0);
       const tb = Date.parse(b.last_seen_at || 0);
@@ -818,8 +893,9 @@ export class ClipboardHub {
       last_clipboard_at: item.last_clipboard_at || null,
       last_seen_at: item.last_seen_at || null,
       joined_at: item.joined_at || null,
-      connected: this.agentSockets.has(item.id),
+      connected: item.last_seen_at && now - Date.parse(item.last_seen_at) <= ONLINE_STALE_MS,
       clipboard_history: Array.isArray(item.clipboard_history) ? item.clipboard_history : [],
+      pending_count: Array.isArray(item.pending_commands) ? item.pending_commands.length : 0,
     }));
   }
 
@@ -899,7 +975,8 @@ export class ClipboardHub {
       last_seen_at: stamp,
       last_clipboard: "",
       last_clipboard_at: null,
-      pending_clipboard: null,
+      pending_commands: [],
+      recent_clipboard_event_ids: [],
       clipboard_history: [],
     };
 
@@ -937,8 +1014,18 @@ export class ClipboardHub {
       return jsonResponse({ error: "device not found" }, 404);
     }
 
-    device.pending_clipboard = body.text;
-    device.last_seen_at = nowIso();
+    ensureDeviceQueues(device);
+    const cmd = {
+      cmd_id: commandId(),
+      text: body.text,
+      created_at: nowIso(),
+    };
+    device.pending_commands.push(cmd);
+    if (device.pending_commands.length > MAX_PENDING_COMMANDS) {
+      device.pending_commands = device.pending_commands.slice(
+        device.pending_commands.length - MAX_PENDING_COMMANDS
+      );
+    }
     appendClipboardHistory(device, body.text);
     devices[deviceId] = device;
     await this.setDevicesMap(devices);
@@ -946,13 +1033,13 @@ export class ClipboardHub {
     const socket = this.agentSockets.get(deviceId);
     if (socket) {
       try {
-        socket.send(JSON.stringify({ type: "set_clipboard", text: body.text }));
+        this.sendPendingCommandsToSocket(socket, device);
       } catch {
-        // Socket may be stale; pending_clipboard remains in storage.
+        this.agentSockets.delete(deviceId);
       }
     }
     await this.broadcastDevices();
-    return jsonResponse({ ok: true, queued: !socket });
+    return jsonResponse({ ok: true, queued: !socket, cmd_id: cmd.cmd_id });
   }
 
   async acceptAgentSocket(request, url) {
@@ -980,13 +1067,12 @@ export class ClipboardHub {
     this.agentSockets.set(deviceId, server);
 
     device.last_seen_at = nowIso();
+    ensureDeviceQueues(device);
     devices[deviceId] = device;
     await this.setDevicesMap(devices);
     await this.broadcastDevices();
 
-    if (device.pending_clipboard !== null && device.pending_clipboard !== undefined) {
-      server.send(JSON.stringify({ type: "set_clipboard", text: device.pending_clipboard }));
-    }
+    this.sendPendingCommandsToSocket(server, device);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -1031,16 +1117,46 @@ export class ClipboardHub {
     }
 
     if (payload.type === "clipboard" && typeof payload.text === "string") {
-      device.last_clipboard = payload.text;
-      device.last_clipboard_at = nowIso();
-      device.last_seen_at = nowIso();
-      appendClipboardHistory(device, payload.text);
-      if (device.pending_clipboard === payload.text) {
-        device.pending_clipboard = null;
+      const eventId = typeof payload.event_id === "string" ? payload.event_id : null;
+      if (eventId && hasRecentEventId(device, eventId)) {
+        try {
+          ws.send(JSON.stringify({ type: "ack_clipboard", event_id: eventId }));
+        } catch {}
+        return;
       }
+
+      if (eventId) {
+        addRecentEventId(device, eventId);
+      }
+      device.last_seen_at = nowIso();
+
+      if (payload.text !== "out") {
+        device.last_clipboard = payload.text;
+        device.last_clipboard_at = nowIso();
+        appendClipboardHistory(device, payload.text);
+      }
+
       devices[meta.deviceId] = device;
       await this.setDevicesMap(devices);
       await this.broadcastDevices();
+
+      if (eventId) {
+        try {
+          ws.send(JSON.stringify({ type: "ack_clipboard", event_id: eventId }));
+        } catch {}
+      }
+      return;
+    }
+
+    if (payload.type === "ack_command" && typeof payload.cmd_id === "string") {
+      ensureDeviceQueues(device);
+      const changed = removePendingCommand(device, payload.cmd_id);
+      if (changed) {
+        device.last_seen_at = nowIso();
+        devices[meta.deviceId] = device;
+        await this.setDevicesMap(devices);
+        await this.broadcastDevices();
+      }
       return;
     }
 
@@ -1048,6 +1164,7 @@ export class ClipboardHub {
       device.last_seen_at = nowIso();
       devices[meta.deviceId] = device;
       await this.setDevicesMap(devices);
+      this.sendPendingCommandsToSocket(ws, device);
       await this.broadcastDevices();
     }
   }
@@ -1077,6 +1194,7 @@ export class ClipboardHub {
     }
 
     const devices = await this.getDevicesMap();
+    this.pruneStaleAgentSockets(devices);
     const msg = JSON.stringify({ type: "devices", devices: this.normalizeDevices(devices) });
     for (const ws of this.dashboardSockets) {
       try {

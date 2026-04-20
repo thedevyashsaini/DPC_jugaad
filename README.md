@@ -16,7 +16,8 @@ Centralized multi-device clipboard architecture using Cloudflare Workers + Durab
 - **Local agent CLI**: `clipcli.py`
   - `abc add <name>` creates token (admin side).
   - `abc join` joins a machine using token and saves credentials.
-  - `abc run` runs clipboard sync agent in background/foreground.
+- `abc run` runs clipboard sync agent in background/foreground.
+  - Includes local persistent outbox queue for offline-to-online recovery.
 
 ## Why this architecture
 
@@ -161,3 +162,10 @@ uv run abc nuke --server https://your-worker-url.workers.dev --admin-token <ADMI
   - clipboard size limits,
   - audit logs,
   - optional encryption-at-rest strategy for clipboard payloads.
+
+## Offline Recovery Behavior
+
+- Agent keeps a local outbox at `~/.clipboard_fleet/outbox.json` when internet is unavailable.
+- On reconnect, queued clipboard events are sent and removed only after server ACK.
+- After each successful outbound sync ACK, agent writes `out` to local clipboard as sync marker.
+- Server keeps per-device pending command queue; offline device receives queued commands on reconnect.

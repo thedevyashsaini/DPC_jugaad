@@ -21,7 +21,9 @@ import websockets
 
 STATE_DIR = Path.home() / ".clipboard_fleet"
 STATE_FILE = STATE_DIR / "device.json"
+OUTBOX_FILE = STATE_DIR / "outbox.json"
 DEFAULT_SERVICE_NAME = "clipboard-fleet-agent"
+OUT_MARKER = "out"
 CLI_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -77,6 +79,39 @@ def save_state(data: dict[str, Any]) -> None:
     STATE_FILE.write_text(
         json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8"
     )
+
+
+def load_outbox() -> list[dict[str, Any]]:
+    if not OUTBOX_FILE.exists():
+        return []
+    try:
+        data = json.loads(OUTBOX_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for item in data:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("event_id"), str)
+            and isinstance(item.get("text"), str)
+            and isinstance(item.get("created_at"), float)
+        ):
+            cleaned.append(item)
+    return cleaned
+
+
+def save_outbox(items: list[dict[str, Any]]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    OUTBOX_FILE.write_text(
+        json.dumps(items, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+
+def make_event_id() -> str:
+    return f"evt_{time.time_ns()}_{random.randint(1000, 9999)}"
 
 
 def run_command(
@@ -513,12 +548,18 @@ class ClipboardAgent:
         self.running = True
         self.last_clipboard = ""
         self.last_sent = ""
+        self.outbox = load_outbox()
+        self.outbox_lock = asyncio.Lock()
+        self.pending_acks: dict[str, float] = {}
+        self.ignore_local_once: str | None = None
 
     async def run(self) -> None:
         while self.running:
             try:
                 await self.connect_and_loop()
             except Exception as exc:
+                self.ws = None
+                self.pending_acks = {}
                 if not self.silent:
                     print(f"[agent] disconnected: {exc}")
                 await asyncio.sleep(2 + random.random() * 2)
@@ -534,17 +575,21 @@ class ClipboardAgent:
             user_agent_header=CLI_USER_AGENT,
         ) as ws:
             self.ws = ws
+            self.pending_acks = {}
             if not self.silent:
                 print("[agent] connected")
             self.last_clipboard = self.read_clipboard_safe()
             if self.last_clipboard is not None:
-                await self.send_clipboard(self.last_clipboard)
+                await self.enqueue_clipboard(self.last_clipboard)
+                await self.flush_outbox()
 
             consumer = asyncio.create_task(self.consume_messages())
             producer = asyncio.create_task(self.watch_clipboard())
             heartbeat = asyncio.create_task(self.send_heartbeat())
+            flusher = asyncio.create_task(self.flush_outbox_periodically())
             done, pending = await asyncio.wait(
-                {consumer, producer, heartbeat}, return_when=asyncio.FIRST_EXCEPTION
+                {consumer, producer, heartbeat, flusher},
+                return_when=asyncio.FIRST_EXCEPTION,
             )
             for task in pending:
                 task.cancel()
@@ -570,16 +615,76 @@ class ClipboardAgent:
     async def send_clipboard(self, text: str) -> None:
         if not self.ws:
             return
-        payload = {"type": "clipboard", "text": text}
+        event_id = make_event_id()
+        payload = {"type": "clipboard", "event_id": event_id, "text": text}
         await self.ws.send(json.dumps(payload, ensure_ascii=True))
         self.last_sent = text
+
+    async def enqueue_clipboard(self, text: str) -> None:
+        if text == OUT_MARKER:
+            return
+        async with self.outbox_lock:
+            if self.outbox and self.outbox[-1]["text"] == text:
+                return
+            item = {
+                "event_id": make_event_id(),
+                "text": text,
+                "created_at": time.time(),
+            }
+            self.outbox.append(item)
+            if len(self.outbox) > 1000:
+                self.outbox = self.outbox[-1000:]
+            save_outbox(self.outbox)
+
+    async def flush_outbox(self) -> None:
+        if not self.ws:
+            return
+        async with self.outbox_lock:
+            for item in self.outbox:
+                event_id = item["event_id"]
+                if event_id in self.pending_acks:
+                    continue
+                payload = {
+                    "type": "clipboard",
+                    "event_id": event_id,
+                    "text": item["text"],
+                }
+                await self.ws.send(json.dumps(payload, ensure_ascii=True))
+                self.pending_acks[event_id] = time.time()
+
+    async def flush_outbox_periodically(self) -> None:
+        while True:
+            await self.flush_outbox()
+            await asyncio.sleep(1.0)
+
+    async def ack_clipboard(self, event_id: str) -> None:
+        acked_text: str | None = None
+        async with self.outbox_lock:
+            for item in self.outbox:
+                if item["event_id"] == event_id:
+                    acked_text = item["text"]
+                    break
+            self.outbox = [x for x in self.outbox if x["event_id"] != event_id]
+            save_outbox(self.outbox)
+            if event_id in self.pending_acks:
+                del self.pending_acks[event_id]
+
+        if acked_text is None:
+            return
+
+        current = self.read_clipboard_safe()
+        if current is None or current != acked_text:
+            return
+
+        self.ignore_local_once = OUT_MARKER
+        self.write_clipboard_safe(OUT_MARKER)
 
     async def send_heartbeat(self) -> None:
         while True:
             if self.ws is None:
                 return
             await self.ws.send(json.dumps({"type": "heartbeat"}, ensure_ascii=True))
-            await asyncio.sleep(20)
+            await asyncio.sleep(8)
 
     async def watch_clipboard(self) -> None:
         while True:
@@ -587,9 +692,15 @@ class ClipboardAgent:
             if now is None:
                 await asyncio.sleep(self.poll_seconds)
                 continue
+            if self.ignore_local_once is not None and now == self.ignore_local_once:
+                self.last_clipboard = now
+                self.ignore_local_once = None
+                await asyncio.sleep(self.poll_seconds)
+                continue
             if now != self.last_clipboard:
                 self.last_clipboard = now
-                await self.send_clipboard(now)
+                await self.enqueue_clipboard(now)
+                await self.flush_outbox()
             await asyncio.sleep(self.poll_seconds)
 
     async def consume_messages(self) -> None:
@@ -607,7 +718,21 @@ class ClipboardAgent:
             ):
                 text = payload["text"]
                 self.write_clipboard_safe(text)
-                await self.send_clipboard(text)
+                self.ignore_local_once = text
+                cmd_id = payload.get("cmd_id")
+                if self.ws and isinstance(cmd_id, str):
+                    await self.ws.send(
+                        json.dumps(
+                            {"type": "ack_command", "cmd_id": cmd_id},
+                            ensure_ascii=True,
+                        )
+                    )
+                continue
+
+            if payload.get("type") == "ack_clipboard" and isinstance(
+                payload.get("event_id"), str
+            ):
+                await self.ack_clipboard(payload["event_id"])
 
 
 def cmd_run(args: argparse.Namespace) -> int:
